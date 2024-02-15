@@ -74,6 +74,9 @@ if torch.cuda.is_available():
 else:
     device = 'cpu'
 
+cur_path = os.path.abspath(__file__)
+ws = os.path.dirname(cur_path)
+print('ws: ', ws)
 def dir_check(path):
     """
     check weather the dir of the given path exists, if not, then create it
@@ -177,7 +180,7 @@ if args.draw_npc:
                                batch_size=args.batch, device=device, num_epoch=args.epoch, npc_step=args.npc_step, load_trained_npc_epoch = args.loadepoch_npc,
                                second_moment_loss_grace=args.second_moment_loss_grace, early_stopping= args.early_stop, is_test=args.test, ddim=args.ddim)
     npc_net = npc_trainer.load_model(epoch=args.loadepoch_npc)
-    val_images, val_ODTs, _ = dataset.get_images(1) # 验证集所有图片
+    val_images, val_ODTs, _ = dataset.get_images(1)
     val_images, val_ODTs = val_images, val_ODTs
     val_gens = diffusion_trainer.gen_images[1]
     val_num = 2048
@@ -187,32 +190,32 @@ if args.draw_npc:
         x_distorted = val_ODTs[:len(x_restored)]
         w_mat = npc_net(torch.tensor(x_restored).float().to(device), torch.tensor(x_distorted).float().to(device))
         w_mat_ = w_mat.flatten(2)
-        w_norms = w_mat_.norm(dim=2) # [b, 5]
-        w_hat_mat = w_mat_ / w_norms[:, :, None] # [b, 5, 3*20*20]
-        sigma = torch.sqrt(w_norms.pow(2)) # 根据代码得到sigma = w_norm, [b, 5]
+        w_norms = w_mat_.norm(dim=2)
+        w_hat_mat = w_mat_ / w_norms[:, :, None]
+        sigma = torch.sqrt(w_norms.pow(2))
 
-        t_list = torch.tensor([-2.5, -2, -1.5, -1, 0]).float().to(device)  # [-1, 1]范围内选3个
-        for i in tqdm(range(len(x_restored))):  # 遍历样本
+        t_list = torch.tensor([-2.5, -2, -1.5, -1, 0]).float().to(device)
+        for i in tqdm(range(len(x_restored))):
 
             imgs = t_list[:, None, None, None, None] * w_hat_mat.reshape(-1, args.n_dirs, 3, args.split, args.split)[i] * sigma[i][None, :, None, None, None] + torch.from_numpy( x_restored[i][None][None]).float().to(device)
             w = w_hat_mat[i].reshape(1, args.n_dirs, 3, args.split, args.split)
 
             imgs = torch.cat([w, imgs], axis=0)  # sample + 1
-            imgs = imgs.transpose(0, 1).contiguous()  # [n_dirs, sample_num + 1, channel, 20, 20]
+            imgs = imgs.transpose(0, 1).contiguous()  # [n_dirs, sample_num + 1, channel, L, L]
             plt.figure(figsize=(num_channel * 5, (1 + (len(t_list) + 1) * args.n_dirs) * 5))
             for c in range(1, num_channel + 1):  # channel
-                plt.subplot(1 + args.n_dirs * (len(t_list) + 1), num_channel, c)  # 对于一个样本，长度上，对于一个主成分方向，有3行，一共5个主成分方向。nrows有16个，ncols有3个
+                plt.subplot(1 + args.n_dirs * (len(t_list) + 1), num_channel, c)
                 plt.title(f'Real Images in channel {c}')
                 plt.imshow(val_images[i][c - 1])
-            for dir in range(1, args.n_dirs + 1):  # 从第 0 + 1个方向开始
+            for dir in range(1, args.n_dirs + 1):
                 for dir_sample in range(1, (len(t_list) + 1) + 1):
-                    for sample_c in range(1, num_channel + 1):  # 先遍历channel
+                    for sample_c in range(1, num_channel + 1):
                         image = imgs[dir - 1][dir_sample - 1][sample_c - 1].detach().cpu().numpy()
                         plt.subplot(1 + args.n_dirs * (len(t_list) + 1), num_channel,
-                                    num_channel + sample_c + (dir - 1) * (len(t_list) + 1) * num_channel + (dir_sample - 1) * num_channel)  # 对于一个样本，长度上，对于一个主成分方向，有3行，一共5个主成分方向。nrows有16个，ncols有3个
+                                    num_channel + sample_c + (dir - 1) * (len(t_list) + 1) * num_channel + (dir_sample - 1) * num_channel)
                         plt.title(f'c{sample_c}-{dir}-th-dir-{dir_sample}-th-s')
                         plt.imshow(image)
-            save_path = '/data/XinZhi/ODUQ/DOT/data/' + 'npc_images/' + f'{args.gen_image_name}/'
+            save_path = ws + '/data/npc_images/' + f'{args.gen_image_name}/'
             dir_check(save_path)
             plt.savefig(save_path + f'{dataset.name}_%03d.png' % i, bbox_inches='tight')
             plt.close()
