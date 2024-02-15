@@ -1,7 +1,5 @@
 import math
 from inspect import isfunction
-from functools import partial
-
 import torch
 from torch import nn
 from torch import einsum
@@ -403,22 +401,16 @@ class PCWrapper(nn.Module):
 
         self.net = net
         self.n_dirs = n_dirs
-        # self.mask = mask
-        # self.init_proj = MLP(5, (64,), dropout=0.1, output_layer=True)
+
         self.init_proj = MLP(5, (128,), dropout=0, output_layer=True)
 
     def forward(self,  x_restored, x_distorted): #  x_resorted, x_distorted(odt)
         x_distorted = self.init_proj(x_distorted[:, :5]).reshape(x_restored.shape)
         x = torch.cat((x_distorted, x_restored), dim=1) #[b, c*2, n, n], x_distorted: [b, f] -> [b, c, n, n]
 
-        # x = (x - 0.5) / 0.2
-        # w_mat = self.net(x_distorted, x_restored)  #[B, n_dirs * c, N, N]
         w_mat = self.net(x)  # [B, n_dirs * c, N, N]
-        # w_mat = w_mat * 0.2
-
         w_mat = w_mat.unflatten(1, (self.n_dirs, w_mat.shape[1] // self.n_dirs))
         w_mat = w_mat.flatten(0, 1)
-        # w_mat = w_mat * self.mask
         w_mat = w_mat.unflatten(0, (w_mat.shape[0] // self.n_dirs, self.n_dirs))
 
         w_mat = gram_schmidt(w_mat) #[b, n_dirs, c, n, n]
