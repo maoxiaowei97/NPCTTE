@@ -4,9 +4,6 @@ from tqdm import tqdm
 
 
 def cosine_beta_schedule(timesteps, s=0.008):
-    """
-    cosine schedule as proposed in https://arxiv.org/abs/2102.09672
-    """
     steps = timesteps + 1
     x = torch.linspace(0, timesteps, steps)
     alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * torch.pi * 0.5) ** 2
