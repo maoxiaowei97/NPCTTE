@@ -6,8 +6,6 @@ import torch
 from torch import nn
 from torch import einsum
 from einops import rearrange
-import numpy as np
-
 
 def exists(x):
     """
@@ -77,12 +75,7 @@ class Block(nn.Module):
         x = self.act(x)
         return x
 
-
 class ResnetBlock(nn.Module):
-    """
-    Convolutional layers with conv-based residual connection.
-    https://arxiv.org/abs/1512.03385
-    """
 
     def __init__(self, dim, dim_out, *, time_emb_dim=None, groups=8):
         super().__init__()
@@ -108,10 +101,6 @@ class ResnetBlock(nn.Module):
 
 
 class ConvNextBlock(nn.Module):
-    """
-    A special type of convolutional block.
-    https://arxiv.org/abs/2201.03545
-    """
 
     def __init__(self, dim, dim_out, *, time_emb_dim=None, mult=2, norm=True):
         super().__init__()
@@ -121,13 +110,7 @@ class ConvNextBlock(nn.Module):
             else None
         )
 
-        # self.ds_conv = nn.Conv2d(dim, dim, 7, padding=3, groups=dim)
         self.ds_conv = nn.Conv2d(dim, dim, 7, padding=3, groups=dim)
-        self.traffic_cov = nn.Conv2d(in_channels=1, out_channels=1, kernel_size=(5, 5), padding=2)
-        # self.traffic_mlp = (
-        #     nn.Sequential(nn.GELU(), nn.Linear(20 * 20 * 1, dim))
-        # )
-
         self.net = nn.Sequential(
             nn.GroupNorm(1, dim) if norm else nn.Identity(),
             nn.Conv2d(dim, dim_out * mult, 3, padding=1),
@@ -139,14 +122,10 @@ class ConvNextBlock(nn.Module):
         self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
 
     def forward(self, x, time_emb=None):
-        h = self.ds_conv(x)  # h, [b, 4, 20, 20]
+        h = self.ds_conv(x)
 
         if exists(self.mlp) and exists(time_emb):
             condition = self.mlp(time_emb)
-            # traffic = self.traffic_cov(traffic)  # [b, 1, 20, 20]
-            # traffic = self.traffic_mlp(traffic.reshape(x.shape[0], -1))
-            # h = h + rearrange(condition, "b c -> b c 1 1") + rearrange(traffic,
-            #                                                            "b c -> b c 1 1")  # h + condition, condition可以变成odt + traffic_state(b, c, n, n). [b, 4, 20, 20], [b, 4, 1, 1]
             h = h + rearrange(condition, "b c -> b c 1 1")
         h = self.net(h)
         return h + self.res_conv(x)
@@ -230,10 +209,6 @@ class LinearAttention(nn.Module):
         out = rearrange(out, "b h c (x y) -> b (h c) x y", h=self.heads, x=h, y=w)
         return self.to_out(out)
 
-
-
-
-
 class ETA_Unet(nn.Module):
     """
     A convolution-based bottleneck network. The network is built up as follows:
@@ -283,7 +258,6 @@ class ETA_Unet(nn.Module):
 
         y_dim = 5
         time_dim = dim * 4
-        # self.y_linear = nn.Linear(y_dim, 128)
         self.y_linear = nn.Linear(y_dim, time_dim)
         self.out_state_linear =  nn.Sequential(nn.Linear(self.channels * self.split * self.split, dim),
                                     nn.LeakyReLU(), nn.Dropout(0.1),
@@ -357,10 +331,10 @@ class ETA_Unet(nn.Module):
         sigma_multi = []
         for a in alpha_list:
             route = x[:, [a]]
-            mask = route[:, :, 0] < 0 # [b, 3, h, w]
-            x_t_diff_max = route[:, :, 2] # [b, 3, h, w]
-            x_t_diff_max[mask] = -1  # [b, 3, h, w]
-            state = self.init_conv(x_t_diff_max) # [b, 3, n, n] -> [b, c_out, n, n]
+            mask = route[:, :, 0] < 0
+            x_t_diff_max = route[:, :, 2]
+            x_t_diff_max[mask] = -1
+            state = self.init_conv(x_t_diff_max)
             y = y[:, :5]
             t = self.y_linear(y)
             h = []
