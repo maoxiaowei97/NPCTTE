@@ -13,8 +13,7 @@ import pandas as pd
 from tqdm import tqdm
 
 cur_path = os.path.abspath(__file__)
-file = os.path.dirname(cur_path)
-ws = os.path.dirname(file)
+ws = os.path.dirname(cur_path)
 pd.options.mode.chained_assignment = None
 
 class TrajectoryDataset:
@@ -28,16 +27,16 @@ class TrajectoryDataset:
         self.is_test = is_test
         self.get_dataframe = get_dataframe
         if is_test:
-            self.image_meta_path = os.path.join('/data/XinZhi/ODUQ/DOT/data/',
+            self.image_meta_path = os.path.join(ws, 'data',
                                                 self.name + f'_S{self.split}_F{self.flat}') + '_image_test.npz'
         else:
-            self.image_meta_path = os.path.join('/data/XinZhi/ODUQ/DOT/data/',
+            self.image_meta_path = os.path.join(ws, 'data',
                                                 self.name + f'_S{self.split}_F{self.flat}') + '_image.npz'
 
         if not self.get_dataframe:
             pass
         else:
-            file_path = '/data/XinZhi/ODUQ/DOT/data/sample_data.hdf'
+            file_path = ws + '/data/sample_data.hdf'
             self.dataframe = pd.read_hdf(file_path, 'df')
             print(f"[Loaded dataset] {file_path}, number of travels {self.dataframe['traj_id'].drop_duplicates().shape[0]}")
             trip_len_counter = Counter(self.dataframe['traj_id'])
