@@ -126,7 +126,7 @@ class DiffusionTrainer:
         self.ddim = ddim
 
         self.ws =ws
-        dir_check(self.ws + '/data/model')
+        dir_check(self.ws + '/data/model/')
         if self.ddim:
             self.save_model_path = os.path.join(self.ws, 'data', 'model',
                                                 f'{self.dataset.name}_denoiser_{self.denoiser.name}_'
@@ -311,7 +311,7 @@ def cal_uq_metric(label, mean, pred_upper, pred_lower, p=True, save=True, save_k
     print('rmse: ', rmse, 'mae: ', mae, 'mape: ', mape, 'interval_width: ', interval_width, 'mis: ', mis, 'picp: ', picp)
     if save == True:
         results = pd.Series([rmse, mae, mape, interval_width, mis, picp], index=['rmse', 'mae', 'mape', 'interval_width', 'mis', 'picp'])
-        dir_check(ws+ '/output' )
+        dir_check(ws+ '/output/' )
         save_path = ws + '/output/'  + save_key + '.csv'
         results.to_csv(save_path)
     return rmse, mae, mape, interval_width, mis, picp
