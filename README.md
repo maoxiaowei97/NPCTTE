@@ -3,3 +3,6 @@ Deciphering Uncertainty of Travel Time Estimation via Neural Principal Component
 
 # Usage
 `python main.py`
+
+# Data
+We have provided a sample data here, and the full data can be shared upon request.
