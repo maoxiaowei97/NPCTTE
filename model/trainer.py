@@ -9,8 +9,8 @@ import pandas as pd
 from model.diffusion import DiffusionProcess
 
 cur_path = os.path.abspath(__file__)
-ws = os.path.dirname(cur_path)
-ws = os.path.dirname(ws)
+path = os.path.dirname(cur_path)
+ws = os.path.dirname(path)
 
 def dir_check(path):
     """
@@ -82,34 +82,10 @@ def mean_absolute_percentage_error(y_true, y_pred):
     mape = np.mean(np.abs((actual_non_zero - predicted_non_zero) / actual_non_zero))
     return mape
 
-def cal_regression_metric(label, mean, p=True, save=True, save_key='undefined'):
-    rmse = math.sqrt( np.mean((label - mean) ** 2))
-    mae = np.mean(np.abs(label, mean))
-    mape = mean_absolute_percentage_error(label, mean)
-
-    if p:
-        print('rmse: %05.6f, mae: %05.6f, mape: %05.6f' % (rmse, mae, mape * 100), flush=True)
-
-    if save:
-        s = pd.Series([rmse, mae, mape], index=['rmse', 'mae', 'mape'])
-        s.to_csv(f'/data/XinZhi/ODUQ/DOT/output/{save_key}.csv')
-        np.savez(os.path.join('/data/XinZhi/ODUQ/DOT/output/', f'{save_key}.npz'),
-                 pre=mean, label=label)
-        print('[Saved prediction]')
-
-    return rmse, mae, mape
-
-
 class DiffusionTrainer:
     def __init__(self, diffusion: DiffusionProcess, denoiser, dataset, lr, batch_size, loss_type,
-                 num_epoch, early_stop, device, is_test, denoiser_epoch, ddim):
-        """
-        :param diffusion: diffusion model for sampling from q and p.
-        :param denoiser: reverse denoise diffusion model.
-        :param dataset:
-        :param lr:
-        :param device:
-        """
+                 num_epoch, early_stop, device,  denoiser_epoch):
+
         self.diffusion = diffusion
         self.denoiser = denoiser.to(device)
 
@@ -121,25 +97,16 @@ class DiffusionTrainer:
         self.num_epoch = num_epoch
         self.device = device
         self.early_stopping = early_stop
-        self.is_test = is_test
         self.denoiser_epoch = denoiser_epoch
-        self.ddim = ddim
 
         self.ws =ws
-        dir_check(self.ws + '/data/model/')
-        if self.ddim:
-            self.save_model_path = os.path.join(self.ws, 'data', 'model',
-                                                f'{self.dataset.name}_denoiser_{self.denoiser.name}_'
-                                                f'T{self.diffusion.T}_'
-                                                f'DenEpo{self.denoiser_epoch}_'
-                                                f'ddim{self.ddim}_'
-                                                f'S{self.dataset.split}')
-        else:
-            self.save_model_path = os.path.join(self.ws, 'data', 'model',
-                                                f'{self.dataset.name}_denoiser_{self.denoiser.name}_'
-                                                f'T{self.diffusion.T}_'
-                                                f'DenEpo{self.denoiser_epoch}_'
-                                                f'S{self.dataset.split}')
+        dir_check(self.ws + '/data/model')
+
+        self.save_model_path = os.path.join(self.ws, 'data', 'model',
+                                            f'{self.dataset.name}_denoiser_{self.denoiser.name}_'
+                                            f'T{self.diffusion.T}_'
+                                            f'DenEpo{self.denoiser_epoch}_'
+                                            f'S{self.dataset.split}')
 
         self.save_loss_path = os.path.join(self.ws, 'data', 'model',
                                             f'{self.dataset.name}_denoiser_{self.denoiser.name}_'
@@ -148,26 +115,16 @@ class DiffusionTrainer:
                                             f'DenEpo{self.denoiser_epoch}_'
                                             f'S{self.dataset.split}_loss.npy')
 
-        if self.ddim:
-            gen_path = os.path.join(self.ws, 'data',
-                                    f'{self.dataset.name}_images_{self.denoiser.name}_'
-                                    f'T{self.diffusion.T}_'
-                                         f'ddim{self.ddim}_'
-                                     f'DenEpo{self.denoiser_epoch}_'
-                                    f'S{self.dataset.split}')
-        else:
-            gen_path = os.path.join(self.ws, 'data',
-                                    f'{self.dataset.name}_images_{self.denoiser.name}_'
-                                    f'T{self.diffusion.T}_'
-                                    f'sampleDate_01260900_'
-                                       f'DenEpo{self.denoiser_epoch}_'
-                                    f'S{self.dataset.split}')
+        self.gen_set_path = os.path.join(self.ws, 'data',
+                                f'{self.dataset.name}_images_{self.denoiser.name}_'
+                                f'T{self.diffusion.T}_'
+                                f'sampleDate_0410_'
+                                   f'DenEpo{self.denoiser_epoch}_'
+                                f'S{self.dataset.split}.npz')
 
-        if self.is_test:
-            self.gen_set_path = gen_path + '_test.npz'
-        else:
-            self.gen_set_path = gen_path + '.npz'
-
+        self.traffic_condition_path = ws + '/data/' + self.dataset.name + f'_S{self.dataset.split}_F{self.dataset.flat}_trafficcondition.npy'
+        self.traffic_condition = np.load(self.traffic_condition_path, allow_pickle = True)
+        self.traffic_condition = torch.from_numpy(self.traffic_condition).float().to(self.device)
 
         self.gen_images = [np.array([]) for _ in range(3)]
         self.diff_loss = []
@@ -189,9 +146,13 @@ class DiffusionTrainer:
                 batch_img, batch_odt = (torch.from_numpy(np.stack(item, 0)).float().to(self.device)
                                         for item in (batch_img, batch_odt))
 
+                batch_D = batch_odt[:, 5].long().reshape(-1)
+                batch_ts = batch_odt[:, 6].long().reshape(-1)
+                batch_traffic_condition = self.traffic_condition[batch_D, batch_ts - 1].reshape(batch_img.size(0), 1, batch_img.size(2), batch_img.size(3))
+
                 t = torch.randint(0, self.diffusion.T, (batch_img.size(0),)).long().to(self.device)
 
-                loss = self.diffusion.p_losses(self.denoiser, batch_img, t, batch_odt, loss_type=self.loss_type)
+                loss = self.diffusion.p_losses(self.denoiser, batch_img, t, batch_odt, batch_traffic_condition, loss_type=self.loss_type)
                 loss.backward()
                 self.optimizer.step()
 
@@ -243,8 +204,13 @@ class DiffusionTrainer:
             batch_img, batch_odt = (torch.from_numpy(np.stack(item, 0)).float().to(self.device)
                                     for item in (batch_img, batch_odt))
 
-            gen = self.diffusion.p_sample_loop(self.denoiser, shape=batch_img.shape,
-                                               y=batch_odt, display=False)[-1]
+            batch_D = batch_odt[:, 5].long().reshape(-1)
+            batch_ts = batch_odt[:, 6].long().reshape(-1)
+            batch_traffic_condition = self.traffic_condition[batch_D, batch_ts - 1].reshape(batch_img.size(0), 1,
+                                                                                            batch_img.size(2),
+                                                                                            batch_img.size(3))
+
+            gen = self.diffusion.p_sample_loop(self.denoiser, shape=batch_img.shape, y=batch_odt, traffic_condition= batch_traffic_condition, display=False)[-1]
             gens.append(gen)
 
         return np.concatenate(gens, axis=0)
@@ -264,7 +230,7 @@ class DiffusionTrainer:
         for s in select_sets:
             meta_images = self.dataset.get_images(s)
             if s == 0:
-                meta_images = (meta_images[0][:5120], meta_images[1][:5120], meta_images[2][:5120])
+                meta_images = (meta_images[0][:1024], meta_images[1][:1024], meta_images[2][:1024])
             elif s == 1:
                 meta_images = (meta_images[0][:512], meta_images[1][:512], meta_images[2][:512])
             elif s == 2:
@@ -311,7 +277,7 @@ def cal_uq_metric(label, mean, pred_upper, pred_lower, p=True, save=True, save_k
     print('rmse: ', rmse, 'mae: ', mae, 'mape: ', mape, 'interval_width: ', interval_width, 'mis: ', mis, 'picp: ', picp)
     if save == True:
         results = pd.Series([rmse, mae, mape, interval_width, mis, picp], index=['rmse', 'mae', 'mape', 'interval_width', 'mis', 'picp'])
-        dir_check(ws+ '/output/' )
+        dir_check(ws + '/output' )
         save_path = ws + '/output/'  + save_key + '.csv'
         results.to_csv(save_path)
     return rmse, mae, mape, interval_width, mis, picp
@@ -320,12 +286,10 @@ class UQTrainer:
     """
     Trainer for the UQ predictor.
     """
-
     def __init__(self, diffusion, predictor, dataset, gen_images, lr, batch_size, num_epoch, device, predict_task, predict_type,
-                 train_origin=False, val_origin=False, early_stopping=-1, is_test=True, ddim=True):
+                 train_origin=False, val_origin=False, early_stopping=-1, confidence_level = None):
         self.diffusion = diffusion
         self.predictor = predictor.to(device)
-
         self.optimizer = torch.optim.Adam(self.predictor.parameters(), lr=lr)
         self.dataset = dataset
         self.gen_images = gen_images
@@ -339,47 +303,21 @@ class UQTrainer:
         self.l1_loss = nn.L1Loss()
         self.predict_task = predict_task
         self.predict_type = predict_type
-        self.is_test  = is_test
-        self.ddim = ddim
         self.ws = ws
-        if self.is_test:
-            if self.ddim:
-                self.save_model_path = os.path.join('data', 'model',
-                                                    f'{self.dataset.name}_uq_predictor_{self.predictor.name}_'
-                                                    f'D{self.predictor.d_model}_'
-                                                    f'T{self.diffusion.T}_'
-                                                    f'P{self.predict_task}_'
-                                                    f'ddim{self.ddim}_'
-                                                    f'Type{self.predict_type}_'
-                                                    f'S{self.dataset.split}_test.model')
-            else:
-                self.save_model_path = os.path.join('data', 'model',
-                                                    f'{self.dataset.name}_uq_predictor_{self.predictor.name}_'
-                                                    f'D{self.predictor.d_model}_'
-                                                    f'T{self.diffusion.T}_'
-                                                    f'P{self.predict_task}_'
-                                                    f'Type{self.predict_type}_'
-                                                    f'alpha_345_'
-                                                    f'S{self.dataset.split}_test.model')
 
-        else:
-            if self.ddim:
-                self.save_model_path = os.path.join('data', 'model',
-                                                    f'{self.dataset.name}_uq_predictor_{self.predictor.name}_'
-                                                    f'D{self.predictor.d_model}_'
-                                                    f'T{self.diffusion.T}_'
-                                                    f'P{self.predict_task}_'
-                                                    f'ddim{self.ddim}_'
-                                                    f'Type{self.predict_type}_'
-                                                    f'S{self.dataset.split}.model')
-            else:
-                self.save_model_path = os.path.join('data', 'model',
-                                                    f'{self.dataset.name}_uq_predictor_{self.predictor.name}_'
-                                                    f'D{self.predictor.d_model}_'
-                                                    f'T{self.diffusion.T}_'
-                                                    f'P{self.predict_task}_'
-                                                    f'Type{self.predict_type}_'
-                                                    f'S{self.dataset.split}.model')
+        self.traffic_condition_path = ws + '/data/' + self.dataset.name + f'_S{self.dataset.split}_F{self.dataset.flat}_trafficcondition.npy'
+        self.traffic_condition = np.load(self.traffic_condition_path, allow_pickle = True)
+        self.traffic_condition = torch.from_numpy(self.traffic_condition).float().to(self.device)
+
+        self.save_model_path = os.path.join('data', 'model',
+                                            f'{self.dataset.name}_uq_predictor_{self.predictor.name}_'
+                                            f'D{self.predictor.d_model}_'
+                                            f'T{self.diffusion.T}_'
+                                            f'P{self.predict_task}_'
+                                            f'Type{self.predict_type}_'
+                                            f'S{self.dataset.split}.model')
+        self.split = self.dataset.split
+        self.confidence_level = confidence_level
 
     def mae_mis_loss(self, pred_mean, pred_sigma, label):
         pred_upper = pred_mean + pred_sigma
@@ -391,11 +329,11 @@ class UQTrainer:
 
         loss0 = torch.mean(torch.abs(pred_mean - label))
         loss1 = torch.mean(torch.max(pred_upper - pred_lower, torch.tensor([0.]).to(pred_mean.device)))
-        loss2 = torch.mean(torch.max(pred_lower - label.float(), torch.tensor([0.]).to(pred_mean.device))) * 20
-        loss3 = torch.mean( torch.max(label.float() - pred_upper, torch.tensor([0.]).to(pred_mean.device))) * 20
+        loss2 = torch.mean(torch.max(pred_lower - label.float(), torch.tensor([0.]).to(pred_mean.device))) * 2 / (1 - self.confidence_level)
+        loss3 = torch.mean( torch.max(label.float() - pred_upper, torch.tensor([0.]).to(pred_mean.device))) * 2 / (1 - self.confidence_level)
         loss4 =  torch.mean(torch.abs(pred_mean - label) / label)
 
-        return  loss4 * 30 + loss0 + loss1 + loss2 + loss3
+        return  loss4 + loss0 + loss1 + loss2 + loss3
 
     def train_epoch(self, eta_input, meta):
         self.predictor.train()
@@ -409,13 +347,14 @@ class UQTrainer:
                 batch_input, batch_odt, batch_label = zip(*batch)
                 batch_input, batch_odt, batch_label = (torch.from_numpy(np.stack(item, 0)).float().to(self.device)
                                                        for item in (batch_input, batch_odt, batch_label))
-                pre, sigma = self.predictor(x = batch_input, y = batch_odt)  # (batch_size,), (batch_size,)
-
+                batch_D = batch_odt[:, 5].long().reshape(-1)
+                batch_ts = batch_odt[:, 6].long().reshape(-1)
+                batch_traffic_condition = self.traffic_condition[batch_D, batch_ts - 1].reshape(batch_input.size(0), 1, self.split, self.split)
+                pre, sigma = self.predictor(x = batch_input, y = batch_odt, traffic_condition = batch_traffic_condition)
                 loss = self.mae_mis_loss(pre, sigma, batch_label.reshape(-1))
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
-
                 losses.append(loss.item())
                 pbar.set_description(desc_txt % (loss.item()))
         return float(np.mean(losses))
@@ -433,7 +372,12 @@ class UQTrainer:
             batch_input, batch_odt = zip(*batch)
             batch_input, batch_odt = (torch.from_numpy(np.stack(item, 0)).float().to(self.device)
                                       for item in (batch_input, batch_odt))
-            mean, sigma = self.predictor(x = batch_input, y = batch_odt)
+            batch_D = batch_odt[:, 5].long().reshape(-1)
+            batch_ts = batch_odt[:, 6].long().reshape(-1)
+            batch_traffic_condition = self.traffic_condition[batch_D, batch_ts - 1].reshape(batch_input.size(0), 1,
+                                                                                            self.split ,
+                                                                                            self.split )
+            mean, sigma = self.predictor(x = batch_input, y = batch_odt, traffic_condition = batch_traffic_condition)
             means.append(mean.detach().cpu().numpy().mean(1))
             pred_uppers.append((mean + sigma).detach().cpu().numpy().mean(1))
             pred_lowers.append((mean - sigma).detach().cpu().numpy().mean(1))
@@ -510,13 +454,12 @@ class NpcTrainer:
     """
 
     def __init__(self, diffusion: DiffusionProcess, denoiser, gen_images, npc_net, dataset, lr, batch_size,
-                 num_epoch, npc_step, second_moment_loss_grace, early_stopping,  device, is_test, load_trained_npc_epoch, ddim):
+                 num_epoch, npc_step, second_moment_loss_grace, early_stopping,  device, load_trained_npc_epoch):
 
         self.diffusion = diffusion
         self.denoiser = denoiser.to(device)
         self.gen_images = gen_images
         self.npc_net = npc_net.to(device)
-        self.ddim = ddim
 
         self.npc_optimizer = torch.optim.Adam(self.npc_net.parameters(), lr=lr)
         self.dataset = dataset
@@ -537,25 +480,13 @@ class NpcTrainer:
                                             f'npc_epoch{self.num_epoch}_'
                                             f'S{self.dataset.split}.model')
 
-        if self.ddim:
-            gen_path = os.path.join(ws, 'data/npc_generation',
-                                    f'{self.dataset.name}_npc_images_'
-                                    f'T{self.diffusion.T}_'
-                                    f'ddim{self.ddim}_'
-                                    f'S{self.dataset.split}')
-        else:
-            gen_path = os.path.join(ws, 'data/npc_generation',
-                                    f'{self.dataset.name}_npc_images_'
-                                    f'T{self.diffusion.T}_'
-                                    f'npc_epoch{self.num_epoch}_'
-                                    f'load_trained_npc_epoch{self.load_trained_npc_epoch}_'
-                                    f'sample_num{self.sample_num}_'
-                                    f'S{self.dataset.split}')
-
-        self.is_test = is_test
-        self.gen_set_path = gen_path + '.npz'
-        if self.is_test:
-            self.gen_set_path = gen_path + '_test_10w.npz'
+        self.gen_set_path = os.path.join(ws, 'data/npc_generation',
+                                f'{self.dataset.name}_npc_images_'
+                                f'T{self.diffusion.T}_'
+                                f'npc_epoch{self.num_epoch}_'
+                                f'load_trained_npc_epoch{self.load_trained_npc_epoch}_'
+                                f'sample_num{self.sample_num}_'
+                                f'S{self.dataset.split}.npz')
 
         self.early_stopping = early_stopping
 
@@ -565,6 +496,9 @@ class NpcTrainer:
                                             f'T{self.diffusion.T}_'
                                             f'S{self.dataset.split}_loss.npy')
 
+        self.traffic_condition_path = ws + '/data/' + self.dataset.name + f'_S{self.dataset.split}_F{self.dataset.flat}_trafficcondition.npy'
+        self.traffic_condition = np.load(self.traffic_condition_path, allow_pickle = True)
+        self.traffic_condition = torch.from_numpy(self.traffic_condition).float().to(self.device)
 
     def train_epoch(self, train_gen, meta):
         self.denoiser.eval()
@@ -580,7 +514,12 @@ class NpcTrainer:
 
                 batch_gen, batch_img, batch_odt, _ = zip(*batch)
                 batch_gen, batch_img, batch_odt = (torch.from_numpy(np.stack(item, 0)).float().to(self.device) for item in (batch_gen, batch_img, batch_odt))
-                w_mat = self.npc_net(batch_gen, batch_odt)
+                batch_D = batch_odt[:, 5].long().reshape(-1)
+                batch_ts = batch_odt[:, 6].long().reshape(-1)
+                batch_traffic_condition = self.traffic_condition[batch_D, batch_ts - 1].reshape(batch_img.size(0), 1,
+                                                                                                batch_img.size(2),
+                                                                                                batch_img.size(3))
+                w_mat = self.npc_net(batch_gen, batch_odt, batch_traffic_condition)
                 w_mat_ = w_mat.flatten(2)
                 w_norms = w_mat_.norm(dim=2)
                 w_hat_mat = w_mat_ / w_norms[:, :, None]
@@ -595,8 +534,8 @@ class NpcTrainer:
 
                 ## W hat loss
                 ## ----------
-                err_proj = torch.einsum('bki,bi->bk', w_hat_mat, err)  # 主成分 + error
-                reconst_err = 1 - err_proj.pow(2).sum(dim=1)  # 1在这里是希望loss>0, 本质是L_w
+                err_proj = torch.einsum('bki,bi->bk', w_hat_mat, err)
+                reconst_err = 1 - err_proj.pow(2).sum(dim=1)
 
                 ## W norms loss
                 ## ------------
@@ -654,8 +593,6 @@ class NpcTrainer:
         save_loss_path = self.save_loss_path
         if epoch is not None:
             save_path += f'_epoch{epoch}'
-        if self.is_test:
-            save_path += '_test'
         torch.save(self.npc_net.state_dict(), save_path)
         np.save(save_loss_path, np.array(self.npc_loss))
         print('[Saved npc net] to ' + save_path)
@@ -665,8 +602,7 @@ class NpcTrainer:
         save_path = self.save_model_path
         if epoch is not None:
             save_path += f'_epoch{epoch}'
-        if self.is_test:
-            save_path += '_test'
+
         self.npc_net.load_state_dict(torch.load(save_path, map_location=self.device), strict=True)
         print('[Loaded npc] from ' + save_path)
         return self.npc_net
@@ -697,17 +633,21 @@ class NpcTrainer:
             for batch in pbar:
                 batch_gen, batch_img, batch_odt, batch_arrival = zip(*batch)
                 batch_gen, batch_img, batch_odt = (torch.from_numpy(np.stack(item, 0)).float().to(self.device) for item in (batch_gen, batch_img, batch_odt))
+                batch_D = batch_odt[:, 5].long().reshape(-1)
+                batch_ts = batch_odt[:, 6].long().reshape(-1)
+                batch_traffic_condition = self.traffic_condition[batch_D, batch_ts - 1].reshape(batch_img.size(0), 1,
+                                                                                                batch_img.size(2),
+                                                                                                batch_img.size(3))
                 img_list = []
                 with torch.no_grad():
-                    w_mat = self.npc_net(batch_gen, batch_odt)
+                    w_mat = self.npc_net(batch_gen, batch_odt, batch_traffic_condition)
                     w_mat_ = w_mat.flatten(2)
                     w_norms = w_mat_.norm(dim=2)
                     w_hat_mat = w_mat_ / w_norms[:, :, None]
                     sigma = torch.sqrt(w_norms.pow(2))
                     for i in range(len(t_list)):
-                        img_list.append(w_hat_mat.reshape(-1, 5, 3, 20, 20)[:, 0, :, :, :] * t_list[i] * sigma[:, 0][:, None, None, None]  + batch_gen)
+                        img_list.append(w_hat_mat.reshape(-1, 5, batch_img.size(1), batch_img.size(2), batch_img.size(3))[:, 0, :, :, :] * t_list[i] * sigma[:, 0][:, None, None, None]  + batch_gen)
                     img = torch.stack(img_list, dim=1)
                     gens.append(img.detach().cpu().numpy())
 
         return  np.concatenate(gens, axis=0)
-
