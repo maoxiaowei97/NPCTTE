@@ -10,12 +10,13 @@ from model.diffusion import DiffusionProcess
 from model.denoiser import Unet
 from model.predictor import ETA_Unet
 import plotly.express as px
+import numpy as np
 
 parser = ArgumentParser()
 parser.add_argument('--cuda', help='the index of the cuda device', type=int, default=1)
 # Dataset arguments
-parser.add_argument('-n', '--name', help='the name of the dataset', type=str, default='sample_0215')
-parser.add_argument('--gen_image_name', help=' supp name of the generated images', type=str, default='01261500')
+parser.add_argument('-n', '--name', help='the name of the dataset', type=str, default='sample')
+parser.add_argument('--gen_image_name', help=' supp name of the generated images', type=str, default='202404100900')
 parser.add_argument('-s', '--split', help='the number of x and y split', type=int, default=20)
 parser.add_argument('--flat', default=False)
 
@@ -46,18 +47,16 @@ parser.add_argument('--loadgen', help='whether to load generated images', defaul
 parser.add_argument('--loadnpcgen', help='whether to load generated npc images', default=False)
 parser.add_argument('--uq_estimate', help='whether estimate uq', default=False)
 parser.add_argument('--uq_num', help='num of uncertainty quantification', default=3)
-parser.add_argument('--ddim', help='whether ddim', default=False)
 
 parser.add_argument('--draw', help='whether to draw generated images', default=False)
 parser.add_argument('--draw_npc', help='whether to draw generated npc images', default=False)
 parser.add_argument('--numimage', help='number of images to draw', type=int, default=100)
-parser.add_argument('--test', help='whether test', type=str, default=False)
 
 # ETA training arguments
 parser.add_argument('--traineta', help='whether to train the ETA prediction model', default=False)
 parser.add_argument('--predictor', help='name of the predictor', type=str, default='trans')
 parser.add_argument('--predict_type', help='only_mean, only_npc, mean_npc', type=str, default='mean_npc')
-parser.add_argument('--predict_task', help='mis, mae, mape', type=str, default='mae')
+parser.add_argument('--predict_task', help='mis, mae, mape', type=str, default='mape')
 parser.add_argument('--predictorL', help='number of layers in the predictor', type=int, default=2)
 parser.add_argument('--trainorigin', help='whether to use original images to train ETA predictor', default=False)
 parser.add_argument('--valorigin', help='whether to use original images to evaluate ETA predictor', default=False)
@@ -65,6 +64,7 @@ parser.add_argument('--stop', help='number of early stopping epoch for ETA train
 
 # Predictor arguments
 parser.add_argument('-d', '--dmodel', help='dimension of predictor models', type=int, default=128)
+parser.add_argument('--confidence_level',  help='confidence level for MIS loss', type=int, default=0.8)
 parser.add_argument('--rmst',  help='whether to train the ETA prediction model with image information', default=False)
 args = parser.parse_args()
 
@@ -73,10 +73,8 @@ if torch.cuda.is_available():
     device = 'cuda'
 else:
     device = 'cpu'
+# device = 'cpu'
 
-cur_path = os.path.abspath(__file__)
-ws = os.path.dirname(cur_path)
-print('ws: ', ws)
 def dir_check(path):
     """
     check weather the dir of the given path exists, if not, then create it
@@ -85,35 +83,27 @@ def dir_check(path):
     dir = path if os.path.isdir(path) else os.path.split(path)[0]
     if not os.path.exists(dir): os.makedirs(dir)
 
+cur_path = os.path.abspath(__file__)
+ws = os.path.dirname(cur_path)
+
 # Loading dataset
-dataset = TrajectoryDataset(args.name, split=args.split, partial=args.partial, small=False, flat=args.flat, is_test=args.test, get_dataframe=True)
+dataset = TrajectoryDataset(args.name, split=args.split, partial=args.partial, flat=args.flat, get_dataframe=True)
 dataset.dump_images_state()
 dataset.load_images()
 
 # Create models.
-denoiser = Unet(dim=args.split, channels=dataset.num_channel, init_dim=4, dim_mults=(1, 2, 4), condition=args.condition)
-npc_unet = PCWrapper(npc_UNet(in_channels=3 + 3, out_channels=3 * args.n_dirs), n_dirs=args.n_dirs)
+denoiser = Unet(dim=args.split, channels=dataset.num_channel, init_dim=4, dim_mults=(1, 2, 4), condition=args.condition, grid_num=args.split)
+npc_unet = PCWrapper(npc_UNet(in_channels=3 + 3 + 1, out_channels=3 * args.n_dirs), n_dirs=args.n_dirs)
 diffusion = DiffusionProcess(T=args.timestep, schedule_name='linear')
 diffusion_trainer = DiffusionTrainer(diffusion=diffusion, denoiser=denoiser, dataset=dataset, lr=1e-3,
                                      batch_size=args.batch, loss_type='huber', device=device, num_epoch=args.epoch,
-                                     early_stop = args.early_stop, denoiser_epoch=args.trainepoch_denoiser, is_test=args.test, ddim=args.ddim)
+                                     early_stop = args.early_stop, denoiser_epoch=args.trainepoch_denoiser)
 
 if args.loaddiff:
     denoiser = diffusion_trainer.load_model(None if args.loadepoch_denoiser == -1 else args.loadepoch_denoiser)
     print('denoiser loaded...')
 elif args.traindiff:
     denoiser = diffusion_trainer.train()
-
-if args.loadnpc:
-    denoiser = diffusion_trainer.load_model(None if args.loadepoch_denoiser == -1 else args.loadepoch_denoiser)
-    diffusion_trainer.load_generation()
-    npc_trainer = NpcTrainer(diffusion=diffusion, denoiser=denoiser, gen_images=diffusion_trainer.gen_images, npc_net=npc_unet, dataset=dataset, lr=1e-3,
-                               batch_size=args.batch, device=device, num_epoch=args.epoch, npc_step=args.npc_step, load_trained_npc_epoch = args.loadepoch_npc,
-                               second_moment_loss_grace=args.second_moment_loss_grace, early_stopping = args.early_stop, is_test=args.test, ddim=args.ddim)
-    npc_net = npc_trainer.load_model(None if args.loadepoch_npc == -1 else args.loadepoch_npc)
-    indices_to_gen = [0, 1, 2]
-    npc_trainer.save_generation(indices_to_gen)
-    print('npc gen saved')
 
 if args.trainnpc:
     if args.loadgen:
@@ -127,7 +117,7 @@ if args.trainnpc:
 
     npc_trainer = NpcTrainer(diffusion=diffusion, denoiser=denoiser, gen_images=diffusion_trainer.gen_images, npc_net = npc_unet, dataset=dataset, lr=1e-3,
                                      batch_size=args.batch, device=device, num_epoch=args.epoch, load_trained_npc_epoch = args.loadepoch_npc,
-                               npc_step=args.npc_step, second_moment_loss_grace=args.second_moment_loss_grace, early_stopping= args.early_stop, is_test = args.test, ddim=args.ddim)
+                               npc_step=args.npc_step, second_moment_loss_grace=args.second_moment_loss_grace, early_stopping= args.early_stop)
     print('start npc training...')
     npc_net = npc_trainer.train()
     print('npc trained')
@@ -135,6 +125,16 @@ if args.trainnpc:
     npc_trainer.save_generation(indices_to_gen)
     print('nppc gen saved')
 
+if args.loadnpc:
+    denoiser = diffusion_trainer.load_model(None if args.loadepoch_denoiser == -1 else args.loadepoch_denoiser)
+    diffusion_trainer.load_generation()
+    npc_trainer = NpcTrainer(diffusion=diffusion, denoiser=denoiser, gen_images=diffusion_trainer.gen_images, npc_net=npc_unet, dataset=dataset, lr=1e-3,
+                               batch_size=args.batch, device=device, num_epoch=args.epoch, npc_step=args.npc_step, load_trained_npc_epoch = args.loadepoch_npc,
+                               second_moment_loss_grace=args.second_moment_loss_grace, early_stopping = args.early_stop)
+    npc_net = npc_trainer.load_model(None if args.loadepoch_npc == -1 else args.loadepoch_npc)
+    indices_to_gen = [0, 1, 2]
+    npc_trainer.save_generation(indices_to_gen)
+    print('npc gen saved')
 
 def scale_img(x):
     return x / torch.abs(x).flatten(-3).max(-1)[0][..., None, None, None] / 1.5 + 0.5
@@ -156,6 +156,9 @@ def imshow(img, scale=1, **kwargs):
 
 # Train UQ predictor.
 if args.trainuq:
+    npc_trainer = NpcTrainer(diffusion=diffusion, denoiser=denoiser, gen_images=diffusion_trainer.gen_images, npc_net = npc_unet, dataset=dataset, lr=1e-3,
+                                     batch_size=args.batch, device=device, num_epoch=args.epoch, load_trained_npc_epoch = args.loadepoch_npc,
+                               npc_step=args.npc_step, second_moment_loss_grace=args.second_moment_loss_grace, early_stopping= args.early_stop)
     npc_trainer.load_generation()
     gen_images = npc_trainer.gen_images
     print('npc images generated')
@@ -167,10 +170,11 @@ if args.trainuq:
                             predict_task=args.predict_task,
                             lr=1e-3, batch_size=args.batch, num_epoch=60, device=device,
                             early_stopping=args.stop,
-                            train_origin=args.trainorigin, val_origin=args.valorigin, is_test = args.test, ddim=args.ddim)
+                            train_origin=args.trainorigin, val_origin=args.valorigin, confidence_level = args.confidence_level)
     uq_trainer.train_val_test()
     print('done')
 
+# draw inferenced GTrajs
 if args.draw_npc:
     # load denoiser and npc
     print('start drawing npc images......')
@@ -178,17 +182,20 @@ if args.draw_npc:
     diffusion_trainer.load_generation()
     npc_trainer = NpcTrainer(diffusion=diffusion, denoiser=denoiser, gen_images=diffusion_trainer.gen_images, npc_net=npc_unet, dataset=dataset, lr=1e-3,
                                batch_size=args.batch, device=device, num_epoch=args.epoch, npc_step=args.npc_step, load_trained_npc_epoch = args.loadepoch_npc,
-                               second_moment_loss_grace=args.second_moment_loss_grace, early_stopping= args.early_stop, is_test=args.test, ddim=args.ddim)
+                               second_moment_loss_grace=args.second_moment_loss_grace, early_stopping= args.early_stop)
+    traffic_condition_path = ws + '/data/' + args.name + f'_S{args.split}_F{args.flat}_trafficcondition.npy'
+    traffic_condition = np.load(traffic_condition_path, allow_pickle=True)
+    traffic_condition = torch.from_numpy(traffic_condition).float().to(device)
     npc_net = npc_trainer.load_model(epoch=args.loadepoch_npc)
-    val_images, val_ODTs, _ = dataset.get_images(1)
-    val_images, val_ODTs = val_images, val_ODTs
-    val_gens = diffusion_trainer.gen_images[1]
-    val_num = 2048
+    test_images, test_ODTs, _ = dataset.get_images(2)
+    test_images, test_ODTs = test_images, test_ODTs
+    test_gens = diffusion_trainer.gen_images[1]
+    test_num = 1024
     with torch.no_grad():
-        x_restored = val_gens[:val_num]
+        x_restored = test_gens[:test_num]
         num_channel = x_restored.shape[1]
-        x_distorted = val_ODTs[:len(x_restored)]
-        w_mat = npc_net(torch.tensor(x_restored).float().to(device), torch.tensor(x_distorted).float().to(device))
+        x_distorted = test_ODTs[:len(x_restored)]
+        w_mat = npc_net(torch.tensor(x_restored).float().to(device), torch.tensor(x_distorted).float().to(device), traffic_condition)
         w_mat_ = w_mat.flatten(2)
         w_norms = w_mat_.norm(dim=2)
         w_hat_mat = w_mat_ / w_norms[:, :, None]
@@ -200,13 +207,13 @@ if args.draw_npc:
             imgs = t_list[:, None, None, None, None] * w_hat_mat.reshape(-1, args.n_dirs, 3, args.split, args.split)[i] * sigma[i][None, :, None, None, None] + torch.from_numpy( x_restored[i][None][None]).float().to(device)
             w = w_hat_mat[i].reshape(1, args.n_dirs, 3, args.split, args.split)
 
-            imgs = torch.cat([w, imgs], axis=0)  # sample + 1
-            imgs = imgs.transpose(0, 1).contiguous()  # [n_dirs, sample_num + 1, channel, L, L]
+            imgs = torch.cat([w, imgs], axis=0)
+            imgs = imgs.transpose(0, 1).contiguous()
             plt.figure(figsize=(num_channel * 5, (1 + (len(t_list) + 1) * args.n_dirs) * 5))
             for c in range(1, num_channel + 1):  # channel
                 plt.subplot(1 + args.n_dirs * (len(t_list) + 1), num_channel, c)
                 plt.title(f'Real Images in channel {c}')
-                plt.imshow(val_images[i][c - 1])
+                plt.imshow(test_images[i][c - 1])
             for dir in range(1, args.n_dirs + 1):
                 for dir_sample in range(1, (len(t_list) + 1) + 1):
                     for sample_c in range(1, num_channel + 1):
@@ -219,5 +226,3 @@ if args.draw_npc:
             dir_check(save_path)
             plt.savefig(save_path + f'{dataset.name}_%03d.png' % i, bbox_inches='tight')
             plt.close()
-
-
