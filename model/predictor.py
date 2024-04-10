@@ -75,7 +75,12 @@ class Block(nn.Module):
         x = self.act(x)
         return x
 
+
 class ResnetBlock(nn.Module):
+    """
+    Convolutional layers with conv-based residual connection.
+    https://arxiv.org/abs/1512.03385
+    """
 
     def __init__(self, dim, dim_out, *, time_emb_dim=None, groups=8):
         super().__init__()
@@ -101,8 +106,12 @@ class ResnetBlock(nn.Module):
 
 
 class ConvNextBlock(nn.Module):
+    """
+    A special type of convolutional block.
+    https://arxiv.org/abs/2201.03545
+    """
 
-    def __init__(self, dim, dim_out, *, time_emb_dim=None, mult=2, norm=True):
+    def __init__(self, dim, dim_out, *, time_emb_dim=None, mult=2, norm=True, grid_num = None):
         super().__init__()
         self.mlp = (
             nn.Sequential(nn.GELU(), nn.Linear(time_emb_dim, dim))
@@ -110,7 +119,13 @@ class ConvNextBlock(nn.Module):
             else None
         )
 
+        # self.ds_conv = nn.Conv2d(dim, dim, 7, padding=3, groups=dim)
         self.ds_conv = nn.Conv2d(dim, dim, 7, padding=3, groups=dim)
+        self.traffic_cov = nn.Conv2d(in_channels=1, out_channels=1, kernel_size=(5, 5), padding=2)
+        self.traffic_mlp = (
+            nn.Sequential(nn.GELU(), nn.Linear(grid_num * grid_num, dim))
+        )
+
         self.net = nn.Sequential(
             nn.GroupNorm(1, dim) if norm else nn.Identity(),
             nn.Conv2d(dim, dim_out * mult, 3, padding=1),
@@ -121,15 +136,15 @@ class ConvNextBlock(nn.Module):
 
         self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
 
-    def forward(self, x, time_emb=None):
+    def forward(self, x, time_emb = None, traffic_condition = None):
         h = self.ds_conv(x)
-
         if exists(self.mlp) and exists(time_emb):
             condition = self.mlp(time_emb)
-            h = h + rearrange(condition, "b c -> b c 1 1")
+            traffic_condition = self.traffic_cov(traffic_condition)
+            traffic_condition = self.traffic_mlp(traffic_condition.reshape(x.shape[0], -1))
+            h = h + rearrange(condition, "b c -> b c 1 1") + rearrange(traffic_condition, "b c -> b c 1 1")
         h = self.net(h)
         return h + self.res_conv(x)
-
 
 class PreNorm(nn.Module):
     """
@@ -144,7 +159,6 @@ class PreNorm(nn.Module):
     def forward(self, x):
         x = self.norm(x)
         return self.fn(x)
-
 
 class Attention(nn.Module):
     """
@@ -208,6 +222,7 @@ class LinearAttention(nn.Module):
         out = torch.einsum("b h d e, b h d n -> b h e n", context, q)
         out = rearrange(out, "b h c (x y) -> b (h c) x y", h=self.heads, x=h, y=w)
         return self.to_out(out)
+
 
 class ETA_Unet(nn.Module):
     """
@@ -282,8 +297,8 @@ class ETA_Unet(nn.Module):
             self.downs.append(
                 nn.ModuleList(
                     [
-                        block_klass(dim_in, dim_out, time_emb_dim=time_dim),
-                        block_klass(dim_out, dim_out, time_emb_dim=time_dim),
+                        block_klass(dim_in, dim_out, time_emb_dim=time_dim, grid_num = self.split),
+                        block_klass(dim_out, dim_out, time_emb_dim=time_dim, grid_num = self.split),
                         Residual(PreNorm(dim_out, LinearAttention(dim_out))),
                         Downsample(dim_out) if not is_last else nn.Identity(),
                     ]
@@ -291,9 +306,9 @@ class ETA_Unet(nn.Module):
             )
 
         mid_dim = dims[-1]
-        self.mid_block1 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim)
+        self.mid_block1 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim, grid_num = self.split)
         self.mid_attn = Residual(PreNorm(mid_dim, Attention(mid_dim)))
-        self.mid_block2 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim)
+        self.mid_block2 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim, grid_num = self.split)
 
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
             is_last = ind >= (num_resolutions - 1)
@@ -301,8 +316,8 @@ class ETA_Unet(nn.Module):
             self.ups.append(
                 nn.ModuleList(
                     [
-                        block_klass(dim_out * 2, dim_in, time_emb_dim=time_dim),
-                        block_klass(dim_in, dim_in, time_emb_dim=time_dim),
+                        block_klass(dim_out * 2, dim_in, time_emb_dim=time_dim, grid_num = self.split),
+                        block_klass(dim_in, dim_in, time_emb_dim=time_dim, grid_num = self.split),
                         Residual(PreNorm(dim_in, LinearAttention(dim_in))),
                         Upsample(dim_in) if not is_last else nn.Identity(),
                     ]
@@ -311,21 +326,20 @@ class ETA_Unet(nn.Module):
 
         out_dim = default(out_dim, channels)
         self.final_conv = nn.Sequential(
-            block_klass(dim, dim), nn.Conv2d(dim, out_dim, 1)
+            block_klass(dim, dim, grid_num = self.split), nn.Conv2d(dim, out_dim, 1)
         )
 
         self.name = 'unet'
         self.num_layers = len(dim_mults)
 
         self.state_conv = nn.Conv2d(channels, 1, 7, padding=3)
-        self.mean_layer = nn.Sequential(nn.Linear(128 + self.split * self.split, 128),
+        self.mean_layer = nn.Sequential(nn.Linear(self.d_model  + self.split * self.split, self.d_model ),
                                               nn.LeakyReLU(), nn.Dropout(0.1),
-                                              nn.Linear(128, 1))
-        self.sigma_layer = nn.Sequential(nn.Linear(128 + self.split * self.split, 128),
+                                              nn.Linear(self.d_model, 1))
+        self.sigma_layer = nn.Sequential(nn.Linear(self.d_model + self.split * self.split, self.d_model),
                                               nn.LeakyReLU(), nn.Dropout(0.1),
-                                              nn.Linear(128, 1))
-    def forward(self, x, time=None, y=None):  # images, odt
-
+                                              nn.Linear(self.d_model, 1))
+    def forward(self, x, time=None, y=None, traffic_condition = None):
         alpha_list = [3, 4, 5]
         mean_multi = []
         sigma_multi = []
@@ -334,28 +348,28 @@ class ETA_Unet(nn.Module):
             mask = route[:, :, 0] < 0
             x_t_diff_max = route[:, :, 2]
             x_t_diff_max[mask] = -1
-            state = self.init_conv(x_t_diff_max)
+            state = self.init_conv(x_t_diff_max) + traffic_condition
             y = y[:, :5]
             t = self.y_linear(y)
             h = []
             # downsample
             for block1, block2, attn, downsample in self.downs:
-                state = block1(state, t)  # x: [b, 4, h, w]
-                state = block2(state, t)
+                state = block1(state, t, traffic_condition)
+                state = block2(state, t, traffic_condition)
                 state = attn(state)
                 h.append(state)
                 state = downsample(state)
 
             # bottleneck
-            state = self.mid_block1(state, t)
+            state = self.mid_block1(state, t, traffic_condition)
             state = self.mid_attn(state)
-            state = self.mid_block2(state, t)
+            state = self.mid_block2(state, t, traffic_condition)
 
             # upsample
             for block1, block2, attn, upsample in self.ups:
                 state = torch.cat((state, h.pop()), dim=1)
-                state = block1(state, t)
-                state = block2(state, t)
+                state = block1(state, t, traffic_condition)
+                state = block2(state, t, traffic_condition)
                 state = attn(state)
                 state = upsample(state)
 
