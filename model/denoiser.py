@@ -1,7 +1,6 @@
 import math
 from inspect import isfunction
 from functools import partial
-
 import torch
 from torch import nn
 from torch import einsum
@@ -26,7 +25,6 @@ class ContinuousEncoding(nn.Module):
     """
     A type of trigonometric encoding for encode continuous values into distance-sensitive vectors.
     """
-
     def __init__(self, embed_size):
         super().__init__()
         self.omega = nn.Parameter((torch.from_numpy(1 / 10 ** np.linspace(0, 9, embed_size))).float(),
@@ -48,7 +46,6 @@ class Residual(nn.Module):
     """
     Adds the input to the output of a particular function.
     """
-
     def __init__(self, fn):
         """
         :param fn: the function residual connection add to.
@@ -79,7 +76,6 @@ class SinusoidalPositionEmbeddings(nn.Module):
     """
     Sinusoidal-based function used for encoding timestamps.
     """
-
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
@@ -98,7 +94,6 @@ class Block(nn.Module):
     """
     The basic building block of U-Net.
     """
-
     def __init__(self, dim, dim_out, groups=8):
         super().__init__()
         self.proj = nn.Conv2d(dim, dim_out, 3, padding=1)
@@ -122,7 +117,6 @@ class ResnetBlock(nn.Module):
     Convolutional layers with conv-based residual connection.
     https://arxiv.org/abs/1512.03385
     """
-
     def __init__(self, dim, dim_out, *, time_emb_dim=None, groups=8):
         super().__init__()
         self.mlp = (
@@ -151,8 +145,7 @@ class ConvNextBlock(nn.Module):
     A special type of convolutional block.
     https://arxiv.org/abs/2201.03545
     """
-
-    def __init__(self, dim, dim_out, *, time_emb_dim=None, mult=2, norm=True):
+    def __init__(self, dim, dim_out, *, time_emb_dim=None, mult=2, norm=True, grid_num = None):
         super().__init__()
         self.mlp = (
             nn.Sequential(nn.GELU(), nn.Linear(time_emb_dim, dim))
@@ -171,22 +164,25 @@ class ConvNextBlock(nn.Module):
         )
 
         self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
+        self.traffic_cov = nn.Conv2d(in_channels=1, out_channels=1, kernel_size=(5, 5), padding=2)
+        self.traffic_mlp = (
+            nn.Sequential(nn.GELU(), nn.Linear(grid_num * grid_num, dim))
+        )
 
-    def forward(self, x, time_emb=None):
+    def forward(self, x, time_emb=None, traffic_condition = None):
         h = self.ds_conv(x)
         if exists(self.mlp) and exists(time_emb):
             condition = self.mlp(time_emb)
-            h = h + rearrange(condition, "b c -> b c 1 1")
-
+            traffic_condition = self.traffic_cov(traffic_condition)
+            traffic_condition = self.traffic_mlp(traffic_condition.reshape(x.shape[0], -1))
+            h = h + rearrange(condition, "b c -> b c 1 1") + rearrange(traffic_condition, "b c -> b c 1 1")
         h = self.net(h)
         return h + self.res_conv(x)
-
 
 class PreNorm(nn.Module):
     """
     A block used for applying groupnorm before the attention blocks.
     """
-
     def __init__(self, dim, fn):
         super().__init__()
         self.fn = fn
@@ -201,7 +197,6 @@ class Attention(nn.Module):
     """
     Multi-head attention block, the same used in the Transformer.
     """
-
     def __init__(self, dim, heads=4, dim_head=32):
         super().__init__()
         self.scale = dim_head ** -0.5
@@ -232,7 +227,6 @@ class LinearAttention(nn.Module):
     A more efficient attention block, where time- and memory requirements scale linear in the sequence length,
     as opposed to quadratic for regular attention.
     """
-
     def __init__(self, dim, heads=4, dim_head=32):
         super().__init__()
         self.scale = dim_head ** -0.5
@@ -289,7 +283,6 @@ class Unet(nn.Module):
     - Finally, a ResNet/ConvNeXT block followed by a convolutional layer is applied.
 
     """
-
     def __init__(
             self,
             dim,
@@ -301,7 +294,8 @@ class Unet(nn.Module):
             resnet_block_groups=8,
             use_convnext=True,
             convnext_mult=2,
-            condition='odt_all'
+            condition='odt_all',
+            grid_num = None
     ):
         super().__init__()
 
@@ -316,7 +310,7 @@ class Unet(nn.Module):
         in_out = list(zip(dims[:-1], dims[1:]))
 
         if use_convnext:
-            block_klass = partial(ConvNextBlock, mult=convnext_mult)
+            block_klass = partial(ConvNextBlock, mult=convnext_mult, grid_num = grid_num)
         else:
             block_klass = partial(ResnetBlock, groups=resnet_block_groups)
 
@@ -325,7 +319,7 @@ class Unet(nn.Module):
         if with_time_emb:
             time_dim = dim * 4
             self.time_embed = TimeEmbed(dim, time_dim)
-
+            
             if condition == 'odt':
                 y_dim = 5
             elif condition == 'od':
@@ -353,8 +347,8 @@ class Unet(nn.Module):
             self.downs.append(
                 nn.ModuleList(
                     [
-                        block_klass(dim_in, dim_out, time_emb_dim=time_dim),
-                        block_klass(dim_out, dim_out, time_emb_dim=time_dim),
+                        block_klass(dim_in, dim_out, time_emb_dim=time_dim, grid_num = grid_num),
+                        block_klass(dim_out, dim_out, time_emb_dim=time_dim, grid_num = grid_num),
                         Residual(PreNorm(dim_out, LinearAttention(dim_out))),
                         Downsample(dim_out) if not is_last else nn.Identity(),
                     ]
@@ -362,9 +356,9 @@ class Unet(nn.Module):
             )
 
         mid_dim = dims[-1]
-        self.mid_block1 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim)
+        self.mid_block1 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim, grid_num = grid_num)
         self.mid_attn = Residual(PreNorm(mid_dim, Attention(mid_dim)))
-        self.mid_block2 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim)
+        self.mid_block2 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim, grid_num = grid_num)
 
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
             is_last = ind >= (num_resolutions - 1)
@@ -372,8 +366,8 @@ class Unet(nn.Module):
             self.ups.append(
                 nn.ModuleList(
                     [
-                        block_klass(dim_out * 2, dim_in, time_emb_dim=time_dim),
-                        block_klass(dim_in, dim_in, time_emb_dim=time_dim),
+                        block_klass(dim_out * 2, dim_in, time_emb_dim=time_dim, grid_num = grid_num),
+                        block_klass(dim_in, dim_in, time_emb_dim=time_dim, grid_num = grid_num),
                         Residual(PreNorm(dim_in, LinearAttention(dim_in))),
                         Upsample(dim_in) if not is_last else nn.Identity(),
                     ]
@@ -382,15 +376,15 @@ class Unet(nn.Module):
 
         out_dim = default(out_dim, channels)
         self.final_conv = nn.Sequential(
-            block_klass(dim, dim), nn.Conv2d(dim, out_dim, 1)
+            block_klass(dim, dim, grid_num = grid_num), nn.Conv2d(dim, out_dim, 1)
         )
 
         self.name = 'unet'
         self.num_layers = len(dim_mults)
 
-    def forward(self, x, time=None, y=None):
+    def forward(self, x, time=None, y=None, traffic_condition = None):
         if self.condition == 'odt':
-            x = self.init_conv(x)
+            x = self.init_conv(x) + traffic_condition
         t = self.time_embed(time) if exists(self.time_embed) else None
         if y is not None and self.y_linear is not None:
             if self.condition == 'od':
@@ -407,23 +401,23 @@ class Unet(nn.Module):
 
         # downsample
         for block1, block2, attn, downsample in self.downs:
-            x = block1(x, t)
-            x = block2(x, t)
+            x = block1(x, t, traffic_condition)
+            x = block2(x, t, traffic_condition)
             x = attn(x)
             h.append(x)
             x = downsample(x)
 
         # bottleneck
-        x = self.mid_block1(x, t)
+        x = self.mid_block1(x, t, traffic_condition)
         x = self.mid_attn(x)
-        x = self.mid_block2(x, t)
+        x = self.mid_block2(x, t, traffic_condition)
 
         # upsample
         for block1, block2, attn, upsample in self.ups:
             x = torch.cat((x, h.pop()), dim=1)
-            x = block1(x, t)
-            x = block2(x, t)
+            x = block1(x, t, traffic_condition)
+            x = block2(x, t, traffic_condition)
             x = attn(x)
             x = upsample(x)
 
-        return self.final_conv(x)  # [b, c, n, n]
+        return self.final_conv(x) # [b, c, n, n]
