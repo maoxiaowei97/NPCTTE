@@ -6,7 +6,6 @@ from torch import einsum
 from einops import rearrange
 import numpy as np
 
-
 def exists(x):
     """
     Judge whether the input exists.
@@ -401,14 +400,14 @@ class PCWrapper(nn.Module):
 
         self.net = net
         self.n_dirs = n_dirs
-
         self.init_proj = MLP(5, (128,), dropout=0, output_layer=True)
 
-    def forward(self,  x_restored, x_distorted): #  x_resorted, x_distorted(odt)
+    def forward(self,  x_restored, x_distorted, traffic_condition):
         x_distorted = self.init_proj(x_distorted[:, :5]).reshape(x_restored.shape)
-        x = torch.cat((x_distorted, x_restored), dim=1) #[b, c*2, n, n], x_distorted: [b, f] -> [b, c, n, n]
+        x = torch.cat((x_distorted, x_restored, traffic_condition), dim=1)
 
         w_mat = self.net(x)  # [B, n_dirs * c, N, N]
+
         w_mat = w_mat.unflatten(1, (self.n_dirs, w_mat.shape[1] // self.n_dirs))
         w_mat = w_mat.flatten(0, 1)
         w_mat = w_mat.unflatten(0, (w_mat.shape[0] // self.n_dirs, self.n_dirs))
