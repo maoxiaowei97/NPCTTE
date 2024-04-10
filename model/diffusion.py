@@ -4,6 +4,9 @@ from tqdm import tqdm
 
 
 def cosine_beta_schedule(timesteps, s=0.008):
+    """
+    cosine schedule as proposed in https://arxiv.org/abs/2102.09672
+    """
     steps = timesteps + 1
     x = torch.linspace(0, timesteps, steps)
     alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * torch.pi * 0.5) ** 2
@@ -94,7 +97,7 @@ class DiffusionProcess:
 
         return sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
 
-    def p_losses(self, denoise_model, x_start, t, y=None,  noise=None, loss_type="l1"):
+    def p_losses(self, denoise_model, x_start, t, y = None, batch_traffic_condition=None,  noise = None, loss_type="l1"):
         """
         Calculate backward diffusion loss values for given diffusion timestamps.
 
@@ -109,7 +112,7 @@ class DiffusionProcess:
             noise = torch.randn_like(x_start)
 
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
-        predicted_noise = denoise_model(x_noisy, t, y)
+        predicted_noise = denoise_model(x_noisy, t, y, batch_traffic_condition)
 
         if loss_type == 'l1':
             loss = F.l1_loss(noise, predicted_noise)
@@ -123,7 +126,7 @@ class DiffusionProcess:
         return loss
 
     @torch.no_grad()
-    def p_sample(self, model, x, t, t_index, y=None):
+    def p_sample(self, model, x, t, t_index, y=None, traffic_condition = None):
         """
         Calculate backward diffusion process p(x_t-1|x_t).
         """
@@ -134,7 +137,7 @@ class DiffusionProcess:
         sqrt_recip_alphas_t = self.extract(self.sqrt_recip_alphas, t, x.shape)
 
         model_mean = sqrt_recip_alphas_t * (
-                x - betas_t * model(x, t, y) / sqrt_one_minus_alphas_cumprod_t
+                x - betas_t * model(x, t, y, traffic_condition) / sqrt_one_minus_alphas_cumprod_t
         )
 
         if t_index == 0:
@@ -145,7 +148,7 @@ class DiffusionProcess:
             return model_mean + torch.sqrt(posterior_variance_t) * noise
 
     @torch.no_grad()
-    def p_sample_loop(self, model, shape, y=None,display=False):
+    def p_sample_loop(self, model, shape, y, traffic_condition, display=False):
         """
         Finish the full process of backward diffusion, from pure noise x_T, to the noise-free data x_0.
         """
@@ -160,7 +163,7 @@ class DiffusionProcess:
         if display:
             iter = tqdm(iter, desc='Generating images through p-sample')
         for i in iter:
-            img = self.p_sample(model, img, torch.full((b,), i, device=device, dtype=torch.long), i, y=y)
+            img = self.p_sample(model, img, torch.full((b,), i, device=device, dtype=torch.long), i, y=y, traffic_condition = traffic_condition)
             imgs.append(img.cpu().numpy())
         return imgs
 
